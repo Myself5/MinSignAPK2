@@ -33,7 +33,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.AlgorithmParameters;
 import java.security.GeneralSecurityException;
+import java.security.Key;
 import java.security.KeyFactory;
 import java.security.PrivateKey;
 import java.security.Signature;
@@ -42,6 +44,10 @@ import java.security.cert.X509Certificate;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
 import java.security.spec.PKCS8EncodedKeySpec;
+import javax.crypto.EncryptedPrivateKeyInfo;
+import javax.crypto.Cipher;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.SecretKeyFactory;
 
 import sun.security.pkcs.ContentInfo;
 import sun.security.pkcs.PKCS7;
@@ -50,7 +56,7 @@ import sun.security.x509.AlgorithmId;
 import sun.security.x509.X500Name;
 
 public class MinSignAPK {
-	/** Write a .RSA file with a digital signature. */
+    /** Write a .RSA file with a digital signature. */
     private static void writeSignatureBlock(Signature signature, X509Certificate publicKey, OutputStream out)
             throws IOException, GeneralSecurityException {
         SignerInfo signerInfo = new SignerInfo(new X500Name(publicKey.getIssuerX500Principal().getName()),
@@ -62,7 +68,7 @@ public class MinSignAPK {
         pkcs7.encodeSignedData(out);
     }
     
-	private static void signWholeOutputFile(byte[] zipData, OutputStream outputStream, X509Certificate publicKey,
+    private static void signWholeOutputFile(byte[] zipData, OutputStream outputStream, X509Certificate publicKey,
             PrivateKey privateKey) throws IOException, GeneralSecurityException {
 
         // For a zip with no archive comment, the
@@ -125,67 +131,81 @@ public class MinSignAPK {
         outputStream.write((total_size >> 8) & 0xff);
         temp.writeTo(outputStream);
     }
-	
-	private static PrivateKey readPrivateKey(File file)
-	        throws IOException, GeneralSecurityException {
-		DataInputStream input = new DataInputStream(new FileInputStream(file));
-		try {
-			byte[] bytes = new byte[(int) file.length()];
-			input.read(bytes);
+    
+    private static PrivateKey readPrivateKey(File file, String passwd)
+            throws IOException, GeneralSecurityException {
+        DataInputStream input = new DataInputStream(new FileInputStream(file));
+        try {
+            byte[] bytes = new byte[(int) file.length()];
+            input.read(bytes);
 
-			// dont support encrypted keys atm
-			//KeySpec spec = decryptPrivateKey(bytes, file);
-			//if (spec == null) {
-				KeySpec spec = new PKCS8EncodedKeySpec(bytes);
-			//}
+            KeySpec spec;
 
-			try {
-				return KeyFactory.getInstance("RSA").generatePrivate(spec);
-			} catch (InvalidKeySpecException ex) {
-				return KeyFactory.getInstance("DSA").generatePrivate(spec);
-			}
-		} finally {
-			input.close();
-		}
-	}
-	
-	private static X509Certificate readPublicKey(File file)
-			throws IOException, GeneralSecurityException {
-		FileInputStream input = new FileInputStream(file);
-		try {
-			CertificateFactory cf = CertificateFactory.getInstance("X.509");
-			return (X509Certificate) cf.generateCertificate(input);
-		} finally {
-			input.close();
-		}
-	}	
-	
-	public static void main(String[] args) {
-		if (args.length < 4) {
-			System.out.println("MinSignAPK pemfile pk8file inzip outzip");
-			System.out.println("- only adds whole-file signature to zip");
-			return;
-		}
-		 
-		String pemFile = args[0];
-		String pk8File = args[1];
-		String inFile = args[2];
-		String outFile = args[3];
-		
-		try {
-			X509Certificate publicKey = readPublicKey(new File(pemFile));
-			PrivateKey privateKey = readPrivateKey(new File(pk8File));
-			
-			InputStream fis = new FileInputStream(inFile);
-			byte[] buffer = new byte[(int)(new File(inFile)).length()];
-			fis.read(buffer);
-			fis.close();
-			
-			OutputStream fos = new FileOutputStream(outFile, false);
-			signWholeOutputFile(buffer, fos, publicKey, privateKey);
-			fos.close();			
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-	 }
+            try {
+                EncryptedPrivateKeyInfo encryptPKInfo = new EncryptedPrivateKeyInfo(bytes);
+                Cipher cipher = Cipher.getInstance(encryptPKInfo.getAlgName());
+                PBEKeySpec pbeKeySpec = new PBEKeySpec(passwd.toCharArray());
+                SecretKeyFactory secFac = SecretKeyFactory.getInstance(encryptPKInfo.getAlgName());
+                Key pbeKey = secFac.generateSecret(pbeKeySpec);
+                AlgorithmParameters algParams = encryptPKInfo.getAlgParameters();
+                cipher.init(Cipher.DECRYPT_MODE, pbeKey, algParams);
+                spec = encryptPKInfo.getKeySpec(cipher);
+            } catch (IOException ex) {
+                spec = new PKCS8EncodedKeySpec(bytes);
+            }
+
+            try {
+                return KeyFactory.getInstance("RSA").generatePrivate(spec);
+            } catch (InvalidKeySpecException ex) {
+                return KeyFactory.getInstance("DSA").generatePrivate(spec);
+            }
+        } finally {
+            input.close();
+        }
+    }
+    
+    private static X509Certificate readPublicKey(File file)
+            throws IOException, GeneralSecurityException {
+        FileInputStream input = new FileInputStream(file);
+        try {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            return (X509Certificate) cf.generateCertificate(input);
+        } finally {
+            input.close();
+        }
+    }   
+    
+    public static void main(String[] args) {
+        if (args.length < 4) {
+            System.out.println("MinSignAPK pemfile pk8file inzip outzip [password]");
+            System.out.println("- only adds whole-file signature to zip");
+            return;
+        }
+         
+        String pemFile = args[0];
+        String pk8File = args[1];
+        String inFile = args[2];
+        String outFile = args[3];
+        String password = "";
+
+        if (args.length == 5) {
+            password = args[4];
+        }
+        
+        try {
+            X509Certificate publicKey = readPublicKey(new File(pemFile));
+            PrivateKey privateKey = readPrivateKey(new File(pk8File), password);
+            
+            InputStream fis = new FileInputStream(inFile);
+            byte[] buffer = new byte[(int)(new File(inFile)).length()];
+            fis.read(buffer);
+            fis.close();
+            
+            OutputStream fos = new FileOutputStream(outFile, false);
+            signWholeOutputFile(buffer, fos, publicKey, privateKey);
+            fos.close();            
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+     }
 }
